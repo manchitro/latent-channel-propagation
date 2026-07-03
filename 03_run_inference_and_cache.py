@@ -13,8 +13,22 @@ Notes:
   token of the user turn (pre-generation) -- this is the position the
   test/deploy probe in Probing and Steering Evaluation Awareness of
   Language Models is trained on. Swap `--pool` to change this.
-- Saves activations as a single .npz keyed by variant_id to avoid an
-  explosion of small files.
+
+CHECKPOINTING -- this is a long-running job and Colab disconnects mid-run.
+Point --checkpoint-dir at a path on mounted Google Drive (not /content,
+which is wiped when the runtime recycles). Every row is written to disk
+immediately after inference:
+  <checkpoint-dir>/transcripts.jsonl   -- one JSON object appended per row
+  <checkpoint-dir>/acts/<variant_id>.npy  -- one activation array per row
+On restart, the script reads transcripts.jsonl, skips any variant_id
+already present, and resumes with the remaining rows. Just re-run the same
+cell/command after reconnecting -- no flags needed to resume.
+
+At the end (or any time you want a progress snapshot -- pass
+--consolidate-only to do this without running any new inference) all
+checkpointed rows are packed into the final --out-transcripts /
+--out-activations files that 04_label_vea.py and 05_partition_cells.py
+expect.
 
 Requires: pip install transformers accelerate bitsandbytes torch pandas
 """
@@ -102,6 +116,52 @@ def run_one(tok, model, system_prompt: str, user_prompt: str, max_new_tokens=400
     return gen_text, last_token_acts
 
 
+def load_done_ids(transcripts_jsonl: Path) -> set:
+    done = set()
+    if transcripts_jsonl.exists():
+        with open(transcripts_jsonl, "r") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    rec = json.loads(line)
+                    done.add(rec["variant_id"])
+                except (json.JSONDecodeError, KeyError):
+                    continue  # tolerate a truncated last line from a mid-write disconnect
+    return done
+
+
+def consolidate(checkpoint_dir: Path, out_transcripts: str, out_activations: str):
+    transcripts_jsonl = checkpoint_dir / "transcripts.jsonl"
+    acts_dir = checkpoint_dir / "acts"
+
+    records = []
+    if transcripts_jsonl.exists():
+        with open(transcripts_jsonl, "r") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    records.append(json.loads(line))
+                except json.JSONDecodeError:
+                    continue
+
+    act_store = {}
+    if acts_dir.exists():
+        for npy_path in acts_dir.glob("*.npy"):
+            act_store[npy_path.stem] = np.load(npy_path)
+
+    if not records:
+        print("Nothing checkpointed yet -- nothing to consolidate.")
+        return
+
+    pd.DataFrame(records).to_parquet(out_transcripts, index=False)
+    np.savez_compressed(out_activations, **act_store)
+    print(f"Consolidated {len(records)} rows -> {out_transcripts}, {out_activations}")
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--templated", default="templated_corpus.parquet")
@@ -111,22 +171,56 @@ def main():
                      help="cap number of rows for a quick smoke test")
     ap.add_argument("--out-transcripts", default="transcripts.parquet")
     ap.add_argument("--out-activations", default="activations.npz")
+    ap.add_argument("--checkpoint-dir", default="checkpoint",
+                     help="put this on mounted Drive, e.g. "
+                          "/content/drive/MyDrive/latent-channel-propagation/checkpoint "
+                          "-- /content itself is wiped on Colab disconnect/recycle")
+    ap.add_argument("--consolidate-only", action="store_true",
+                     help="skip inference entirely, just pack the current "
+                          "checkpoint into --out-transcripts/--out-activations "
+                          "(useful to inspect progress mid-run)")
     args = ap.parse_args()
+
+    checkpoint_dir = Path(args.checkpoint_dir)
+    acts_dir = checkpoint_dir / "acts"
+    transcripts_jsonl = checkpoint_dir / "transcripts.jsonl"
+
+    if args.consolidate_only:
+        consolidate(checkpoint_dir, args.out_transcripts, args.out_activations)
+        return
+
+    checkpoint_dir.mkdir(parents=True, exist_ok=True)
+    acts_dir.mkdir(parents=True, exist_ok=True)
 
     df = pd.read_parquet(args.templated)
     if args.limit:
         df = df.head(args.limit)
 
+    done_ids = load_done_ids(transcripts_jsonl)
+    remaining = df[~df["variant_id"].isin(done_ids)]
+    print(f"{len(done_ids)} rows already checkpointed, "
+          f"{len(remaining)} remaining out of {len(df)} total.")
+
+    if len(remaining) == 0:
+        print("All rows already done -- consolidating only.")
+        consolidate(checkpoint_dir, args.out_transcripts, args.out_activations)
+        return
+
     tok, model = load_model(args.model_id, four_bit=args.four_bit)
 
-    records = []
-    act_store = {}
-    for _, row in df.iterrows():
-        gen_text, acts = run_one(tok, model, row["system_prompt"], row["user_prompt"])
-        answer = extract_answer(gen_text)
-        reasoning = extract_reasoning(gen_text)
-        records.append(
-            {
+    n_done_this_run = 0
+    with open(transcripts_jsonl, "a") as jf:
+        for _, row in remaining.iterrows():
+            try:
+                gen_text, acts = run_one(tok, model, row["system_prompt"], row["user_prompt"])
+            except Exception as e:
+                # Log and skip -- a single bad row shouldn't kill hours of progress.
+                print(f"ERROR on {row['variant_id']}: {e} -- skipping, will retry next run")
+                continue
+
+            answer = extract_answer(gen_text)
+            reasoning = extract_reasoning(gen_text)
+            record = {
                 "variant_id": row["variant_id"],
                 "prompt_id": row["prompt_id"],
                 "framing": row["framing"],
@@ -136,15 +230,20 @@ def main():
                 "answer": answer,
                 "compliance_label": parse_compliance(answer),
             }
-        )
-        act_store[row["variant_id"]] = acts
-        print(f"done {row['variant_id']} ({row['framing']}) -> "
-              f"{records[-1]['compliance_label']}")
 
-    pd.DataFrame(records).to_parquet(args.out_transcripts, index=False)
-    np.savez_compressed(args.out_activations, **act_store)
-    print(f"Wrote {len(records)} transcripts -> {args.out_transcripts}")
-    print(f"Wrote activations -> {args.out_activations}")
+            # Write-then-flush immediately -- this is the unit of progress that
+            # survives a disconnect. Do the activation save first so a crash
+            # between the two never leaves a transcript row with no matching .npy.
+            np.save(acts_dir / f"{row['variant_id']}.npy", acts)
+            jf.write(json.dumps(record) + "\n")
+            jf.flush()
+
+            n_done_this_run += 1
+            print(f"done {row['variant_id']} ({row['framing']}) -> "
+                  f"{record['compliance_label']}  "
+                  f"[{n_done_this_run}/{len(remaining)} this run]")
+
+    consolidate(checkpoint_dir, args.out_transcripts, args.out_activations)
 
 
 if __name__ == "__main__":
