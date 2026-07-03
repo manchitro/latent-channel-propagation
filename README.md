@@ -25,6 +25,7 @@ Companion code for [[Latent Channel Propagation - Feasibility and Impact]] Phase
 - `01` and `03` require huggingface.co and a GPU respectively — not runnable in this sandbox; verify with `--limit 5` as a smoke test before a full run.
 - Fixed (2026-07-03): `MODEL_ID` in `03_run_inference_and_cache.py` and `run_pipeline.ipynb` was `meta-llama/Llama-3-8B-Instruct`, which 404s on the Hub — corrected to `meta-llama/Meta-Llama-3-8B-Instruct`.
 - Added (2026-07-03): row-level checkpointing to `03_run_inference_and_cache.py` to survive Colab disconnects — verified with a simulated mid-run failure (resume correctly skips completed rows and retries only the failed one).
+- Added (2026-07-03): `run_pipeline.ipynb` now writes every artifact (`corpus.parquet`, `templated_corpus.parquet`, `transcripts.parquet`, `activations.npz`, `labeled_transcripts.parquet`, `partitioned_corpus.parquet`) directly to a `DATA_DIR` on Drive, and each generation step checks for its output before rebuilding. A full Colab runtime recycle now only requires re-running the notebook top to bottom — every step that's already done skips straight to loading its cached file instead of regenerating it. Verified use-before-definition is clean across the full cell sequence and the skip-check logic behaves correctly.
 
 ## Before the full run
 
