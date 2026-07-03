@@ -30,6 +30,14 @@ size, comfortably under the ceiling.
 this script still works if you point it at a non-quantized repo (e.g. for
 architectures without a pre-quantized mirror available).
 
+MODEL CACHE -- pass --cache-dir pointing at mounted Drive (e.g.
+{DATA_DIR}/hf_cache) so the downloaded model weights persist across
+sessions, same reasoning as CHECKPOINTING below: without it, weights land
+in the default local HF cache under /content and get redownloaded on
+every runtime recycle. huggingface_hub resumes partial downloads rather
+than restarting from scratch, so this also helps if a session disconnects
+mid-download, not just across full sessions.
+
 CHECKPOINTING -- this is a long-running job and Colab disconnects mid-run.
 Point --checkpoint-dir at a path on mounted Google Drive (not /content,
 which is wiped when the runtime recycles). Every row is written to disk
@@ -70,7 +78,18 @@ MODEL_ID = "unsloth/llama-3-8b-Instruct-bnb-4bit"  # swap for 70B on scale-up
 _PRE_QUANTIZED_MARKERS = ("bnb-4bit", "-4bit", "_4bit")
 
 
-def load_model(model_id: str, four_bit: bool = True):
+def load_model(model_id: str, four_bit: bool = True, cache_dir: str = None):
+    """cache_dir -- point this at mounted Drive (e.g.
+    /content/drive/MyDrive/latent-channel-propagation/hf_cache) so the
+    downloaded weights persist across Colab sessions. Without it, weights
+    land in the default local HF cache under /content, which is wiped on
+    a runtime recycle -- forcing a full ~5.7GB (or ~16GB, if not
+    pre-quantized) redownload every time. huggingface_hub also resumes
+    partially-downloaded files rather than restarting from scratch, so a
+    Drive-backed cache_dir means a disconnect mid-download only loses
+    progress since the last completed chunk, on top of never needing to
+    redownload a fully-completed model at all.
+    """
     already_quantized = any(m in model_id.lower() for m in _PRE_QUANTIZED_MARKERS)
 
     quant_config = None
@@ -84,13 +103,17 @@ def load_model(model_id: str, four_bit: bool = True):
         print(f"'{model_id}' looks pre-quantized -- loading as-is "
               f"(no fresh BitsAndBytesConfig, no in-RAM requantization).")
 
-    tok = AutoTokenizer.from_pretrained(model_id)
+    if cache_dir:
+        print(f"Using HF cache_dir={cache_dir} -- weights persist here across sessions.")
+
+    tok = AutoTokenizer.from_pretrained(model_id, cache_dir=cache_dir)
     model = AutoModelForCausalLM.from_pretrained(
         model_id,
         quantization_config=quant_config,
         device_map="auto",
         torch_dtype=torch.bfloat16 if not four_bit and not already_quantized else None,
         output_hidden_states=True,
+        cache_dir=cache_dir,
     )
     model.eval()
     return tok, model
@@ -205,6 +228,13 @@ def main():
                      help="put this on mounted Drive, e.g. "
                           "/content/drive/MyDrive/latent-channel-propagation/checkpoint "
                           "-- /content itself is wiped on Colab disconnect/recycle")
+    ap.add_argument("--cache-dir", default=None,
+                     help="Hugging Face cache dir for downloaded model weights -- "
+                          "put this on mounted Drive too (e.g. "
+                          "/content/drive/MyDrive/latent-channel-propagation/hf_cache) "
+                          "so the model is only ever downloaded once, not once per "
+                          "session. Left unset, transformers uses its default local "
+                          "cache under /content, wiped on every runtime recycle.")
     ap.add_argument("--consolidate-only", action="store_true",
                      help="skip inference entirely, just pack the current "
                           "checkpoint into --out-transcripts/--out-activations "
@@ -236,7 +266,7 @@ def main():
         consolidate(checkpoint_dir, args.out_transcripts, args.out_activations)
         return
 
-    tok, model = load_model(args.model_id, four_bit=args.four_bit)
+    tok, model = load_model(args.model_id, four_bit=args.four_bit, cache_dir=args.cache_dir)
 
     n_done_this_run = 0
     with open(transcripts_jsonl, "a") as jf:
