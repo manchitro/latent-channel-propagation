@@ -176,9 +176,19 @@ def run_one(tok, model, system_prompt: str, user_prompt: str, max_new_tokens=400
         {"role": "system", "content": system_prompt},
         {"role": "user", "content": user_prompt},
     ]
-    input_ids = tok.apply_chat_template(
+    prompt = tok.apply_chat_template(
         messages, add_generation_prompt=True, return_tensors="pt"
-    ).to(model.device)
+    )
+    # Depending on the installed transformers version, apply_chat_template
+    # with return_tensors="pt" returns either a bare tensor of token ids, or
+    # a BatchEncoding (dict-like, with .input_ids/.attention_mask). Handle
+    # both -- passing a BatchEncoding straight into model(...) fails deep
+    # inside the embedding lookup with a confusing "must be Tensor, not
+    # BatchEncoding" error, since model() expects plain input_ids.
+    if hasattr(prompt, "input_ids"):
+        input_ids = prompt["input_ids"].to(model.device)
+    else:
+        input_ids = prompt.to(model.device)
 
     # Cache activations at the last prompt token (pre-generation), all layers.
     prefill = model(input_ids, output_hidden_states=True)
