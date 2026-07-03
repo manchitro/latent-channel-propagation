@@ -1,7 +1,7 @@
 """
 Phase 1c - Inference + activation caching (8B pilot).
 
-Colab/Kaggle-compatible: loads Llama-3-8B-Instruct in 4-bit, runs every
+Colab/Kaggle-compatible: loads a 4-bit Llama-3-8B-Instruct, runs every
 templated prompt, saves (a) the generated transcript, (b) a parsed
 compliance/refusal label, and (c) the residual-stream activation at the
 last prompt token for every layer -- the standard probe-training input.
@@ -13,6 +13,22 @@ Notes:
   token of the user turn (pre-generation) -- this is the position the
   test/deploy probe in Probing and Steering Evaluation Awareness of
   Language Models is trained on. Swap `--pool` to change this.
+
+MODEL WEIGHTS -- default MODEL_ID points at a PRE-QUANTIZED checkpoint
+(unsloth/llama-3-8b-Instruct-bnb-4bit, ~5.7GB on disk) rather than the
+full bf16 original (~16GB). This matters beyond download size: loading a
+model with transformers' BitsAndBytesConfig quantizes it from full
+precision at load time, and peak CPU RAM during that process is roughly
+1x the ON-DISK checkpoint size (per HF's own docs) -- i.e. ~16GB for the
+original weights, which exceeds free-tier Colab's ~12-13GB system RAM and
+was the actual cause of repeated load failures at a consistent ~60%
+progress mark. Loading pre-quantized weights skips the in-RAM
+quantization step entirely: peak RAM is roughly the ~5.7GB checkpoint
+size, comfortably under the ceiling.
+`load_model()` auto-detects whether `model_id` is already pre-quantized
+(by name) and only builds a fresh BitsAndBytesConfig if it isn't -- so
+this script still works if you point it at a non-quantized repo (e.g. for
+architectures without a pre-quantized mirror available).
 
 CHECKPOINTING -- this is a long-running job and Colab disconnects mid-run.
 Point --checkpoint-dir at a path on mounted Google Drive (not /content,
@@ -43,23 +59,37 @@ import pandas as pd
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
 
-MODEL_ID = "meta-llama/Meta-Llama-3-8B-Instruct"  # swap for 70B on scale-up
+# Pre-quantized (bnb-4bit) mirror of Llama-3-8B-Instruct -- ~5.7GB on disk vs
+# ~16GB for the original bf16 weights. See module docstring for why this
+# matters beyond download time (peak CPU RAM during load).
+MODEL_ID = "unsloth/llama-3-8b-Instruct-bnb-4bit"  # swap for 70B on scale-up
+
+# Substrings that indicate a model_id is already bnb-4bit-quantized on disk --
+# used to decide whether load_model() needs to build a BitsAndBytesConfig at
+# all, or whether the checkpoint's own config.json already carries one.
+_PRE_QUANTIZED_MARKERS = ("bnb-4bit", "-4bit", "_4bit")
 
 
 def load_model(model_id: str, four_bit: bool = True):
+    already_quantized = any(m in model_id.lower() for m in _PRE_QUANTIZED_MARKERS)
+
     quant_config = None
-    if four_bit:
+    if four_bit and not already_quantized:
         quant_config = BitsAndBytesConfig(
             load_in_4bit=True,
             bnb_4bit_compute_dtype=torch.bfloat16,
             bnb_4bit_quant_type="nf4",
         )
+    elif already_quantized:
+        print(f"'{model_id}' looks pre-quantized -- loading as-is "
+              f"(no fresh BitsAndBytesConfig, no in-RAM requantization).")
+
     tok = AutoTokenizer.from_pretrained(model_id)
     model = AutoModelForCausalLM.from_pretrained(
         model_id,
         quantization_config=quant_config,
         device_map="auto",
-        torch_dtype=torch.bfloat16 if not four_bit else None,
+        torch_dtype=torch.bfloat16 if not four_bit and not already_quantized else None,
         output_hidden_states=True,
     )
     model.eval()
