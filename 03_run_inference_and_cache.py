@@ -15,9 +15,9 @@ Notes:
   Language Models is trained on. Swap `--pool` to change this.
 
 MODEL WEIGHTS -- default MODEL_ID points at a PRE-QUANTIZED checkpoint
-(unsloth/llama-3-8b-Instruct-bnb-4bit, ~5.7GB on disk) rather than the
-full bf16 original (~16GB). This matters beyond download size: loading a
-model with transformers' BitsAndBytesConfig quantizes it from full
+(unsloth/Meta-Llama-3.1-8B-Instruct-bnb-4bit, ~5.7GB on disk) rather than
+a full bf16 original (~16GB). This matters beyond download size: loading
+a model with transformers' BitsAndBytesConfig quantizes it from full
 precision at load time, and peak CPU RAM during that process is roughly
 1x the ON-DISK checkpoint size (per HF's own docs) -- i.e. ~16GB for the
 original weights, which exceeds free-tier Colab's ~12-13GB system RAM and
@@ -29,6 +29,18 @@ size, comfortably under the ceiling.
 (by name) and only builds a fresh BitsAndBytesConfig if it isn't -- so
 this script still works if you point it at a non-quantized repo (e.g. for
 architectures without a pre-quantized mirror available).
+
+NOTE (2026-07-03): the original unsloth/llama-3-8b-Instruct-bnb-4bit repo
+(quantized ~April 2024) failed to load against a current `transformers`
+with a state-dict shape-mismatch error -- the packed bnb quant_state
+tensors weren't being recognized/unpacked, likely a compatibility
+regression between this checkpoint's older serialization format and a
+newer `transformers` loading path. Switched to
+unsloth/Meta-Llama-3.1-8B-Instruct-bnb-4bit, whose containing Hub
+collection is actively maintained (updated within days, not years) --
+this is Llama-3.1 rather than Llama-3, a real model swap (longer context,
+later training cutoff, multilingual support) and not just a
+repackaging, worth remembering if this ever needs a methods-section note.
 
 MODEL CACHE -- pass --cache-dir pointing at mounted Drive (e.g.
 {DATA_DIR}/hf_cache) so the downloaded model weights persist across
@@ -67,10 +79,11 @@ import pandas as pd
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
 
-# Pre-quantized (bnb-4bit) mirror of Llama-3-8B-Instruct -- ~5.7GB on disk vs
-# ~16GB for the original bf16 weights. See module docstring for why this
-# matters beyond download time (peak CPU RAM during load).
-MODEL_ID = "unsloth/llama-3-8b-Instruct-bnb-4bit"  # swap for 70B on scale-up
+# Pre-quantized (bnb-4bit) mirror of Llama-3.1-8B-Instruct -- ~5.7GB on disk
+# vs ~16GB for the original bf16 weights. See module docstring for why this
+# matters beyond download time (peak CPU RAM during load), and why this is
+# Llama-3.1 rather than Llama-3 (the original repo failed to load).
+MODEL_ID = "unsloth/Meta-Llama-3.1-8B-Instruct-bnb-4bit"  # swap for 70B on scale-up
 
 # Substrings that indicate a model_id is already bnb-4bit-quantized on disk --
 # used to decide whether load_model() needs to build a BitsAndBytesConfig at
