@@ -23,6 +23,7 @@ Companion code for [[Latent Channel Propagation - Feasibility and Impact]] Phase
 - All five scripts syntax-checked.
 - Templating (`02`), labeling (`04`), and partitioning (`05`) logic verified end-to-end on synthetic data — correctly detects VEA keywords and computes a non-zero Compliance Gap in the silent cell.
 - `01` and `03` require huggingface.co and a GPU respectively — not runnable in this sandbox; verify with `--limit 5` as a smoke test before a full run.
+- Fixed (2026-07-03): `MODEL_ID` in `03_run_inference_and_cache.py` and `run_pipeline.ipynb` was `meta-llama/Llama-3-8B-Instruct`, which 404s on the Hub — corrected to `meta-llama/Meta-Llama-3-8B-Instruct`.
 
 ## Before the full run
 

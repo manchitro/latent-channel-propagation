@@ -29,7 +29,7 @@ import pandas as pd
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
 
-MODEL_ID = "meta-llama/Llama-3-8B-Instruct"  # swap for 70B on scale-up
+MODEL_ID = "meta-llama/Meta-Llama-3-8B-Instruct"  # swap for 70B on scale-up
 
 
 def load_model(model_id: str, four_bit: bool = True):
