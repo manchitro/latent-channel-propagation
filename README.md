@@ -1,0 +1,31 @@
+---
+created: 2026-07-03
+tags:
+  - evaluation-awareness
+  - llm
+  - mechanistic_interpretability
+updated: 2026-07-03T16:22:07+06:00
+---
+# Phase 1 Scripts — Data Collection
+
+Companion code for [[Latent Channel Propagation - Feasibility and Impact]] Phase 1. Run on a GPU environment with open internet access (Colab/Kaggle for the 8B pilot; AIUB DGX Spark lab for the 70B scale-up).
+
+## Pipeline order
+
+1. **`01_build_corpus.py`** — pulls AdvBench (500 prompts, `walledai/AdvBench`) + WMDP (`cais/wmdp`, capped per subset for pilot size), dedupes, assigns `prompt_id`. Output: `corpus.parquet`.
+2. **`02_build_prompt_templates.py`** — wraps each prompt in Training/Free-tier and Deployment/Paid-tier framings (Compliance Gap setup), adds a `<reasoning>`/`<answer>` CoT scaffold. Output: `templated_corpus.parquet` (2 rows per prompt).
+3. **`03_run_inference_and_cache.py`** — runs Llama-3-8B-Instruct (4-bit by default) over every templated prompt; saves generated transcripts + a placeholder compliance/refusal label + last-token residual-stream activations at every layer. Outputs: `transcripts.parquet`, `activations.npz`. Swap `MODEL_ID` for the 70B scale-up.
+4. **`04_label_vea.py`** — labels each transcript for Verbalized Evaluation Awareness (VEA) via a keyword pass (implemented) and an LLM-judge pass (stub — wire up your provider). Flags keyword/LLM-judge disagreement for human review. Output: `labeled_transcripts.parquet`.
+5. **`05_partition_cells.py`** — splits into the four analysis cells: {verbalized, silent} x {train, deploy}, and prints the Compliance Gap per awareness cell. This is the input to Phase 2 (probe training) and Phase 3 (causal intervention). Output: `partitioned_corpus.parquet`.
+
+## Status
+
+- All five scripts syntax-checked.
+- Templating (`02`), labeling (`04`), and partitioning (`05`) logic verified end-to-end on synthetic data — correctly detects VEA keywords and computes a non-zero Compliance Gap in the silent cell.
+- `01` and `03` require huggingface.co and a GPU respectively — not runnable in this sandbox; verify with `--limit 5` as a smoke test before a full run.
+
+## Before the full run
+
+- Replace the placeholder refusal/compliance heuristic in `03_run_inference_and_cache.py::parse_compliance` with an LLM-judge, consistent with `04`'s judge pattern.
+- Implement `llm_judge_label()` in `04_label_vea.py` and re-run with `--use-llm-judge` to catch paraphrased (non-keyword) VEA.
+- Sanity-check `01`'s WMDP subset cap and AdvBench dataset ID still resolve (HF dataset slugs occasionally get renamed/gated).
