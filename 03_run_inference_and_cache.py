@@ -119,15 +119,29 @@ def load_model(model_id: str, four_bit: bool = True, cache_dir: str = None):
     if cache_dir:
         print(f"Using HF cache_dir={cache_dir} -- weights persist here across sessions.")
 
-    tok = AutoTokenizer.from_pretrained(model_id, cache_dir=cache_dir)
-    model = AutoModelForCausalLM.from_pretrained(
-        model_id,
-        quantization_config=quant_config,
+    # IMPORTANT: only include quantization_config in the call at all when we
+    # actually built one. Explicitly passing quantization_config=None (as an
+    # earlier version of this function did) appears to suppress
+    # transformers' own auto-detection of the quantization config stored in
+    # a pre-quantized repo's config.json -- which is what actually applies
+    # the bnb unpacking logic for packed 4-bit tensors. Passing None was
+    # observed to make from_pretrained treat packed nf4 weights as if they
+    # were plain dense tensors, causing a shape-mismatch error identical
+    # across two different pre-quantized repos (ruling out a checkpoint-
+    # specific format issue). Omitting the kwarg entirely lets
+    # from_pretrained's own detection take over for already-quantized repos.
+    model_kwargs = dict(
         device_map="auto",
-        torch_dtype=torch.bfloat16 if not four_bit and not already_quantized else None,
         output_hidden_states=True,
         cache_dir=cache_dir,
     )
+    if quant_config is not None:
+        model_kwargs["quantization_config"] = quant_config
+    if not four_bit and not already_quantized:
+        model_kwargs["torch_dtype"] = torch.bfloat16
+
+    tok = AutoTokenizer.from_pretrained(model_id, cache_dir=cache_dir)
+    model = AutoModelForCausalLM.from_pretrained(model_id, **model_kwargs)
     model.eval()
     return tok, model
 
